@@ -45,12 +45,23 @@ public class ResourceProfiler extends AbstractMarsToolAndApplication {
     private JPanel registerPanel;
     private JPanel memoryPanel;
     private JPanel branchPanel;
-    
+    private JPanel complexityPanel;
+
     // Table Models
     private DefaultTableModel instructionTableModel;
     private DefaultTableModel registerTableModel;
     private DefaultTableModel memoryTableModel;
     private DefaultTableModel branchTableModel;
+    private DefaultTableModel complexityTableModel;
+
+    // Empirical complexity controls
+    private JTextField benchmarkPathField;
+    private JTextField sizesField;
+    private JComboBox<String> fillModeCombo;
+    private JButton runSweepButton;
+    private JLabel complexityResultLabel;
+    private JLabel complexityDetailLabel;
+    private JTextArea complexityDetailArea;
     
     // Summary Labels
     private JLabel totalInstructionsLabel;
@@ -108,6 +119,7 @@ public class ResourceProfiler extends AbstractMarsToolAndApplication {
         tabbedPane.addTab("Registers", createRegisterPanel());
         tabbedPane.addTab("Memory", createMemoryPanel());
         tabbedPane.addTab("Branch Stats", createBranchPanel());
+        tabbedPane.addTab("Complexity", createComplexityPanel());
         
         // Add listener to refresh when tab changes
         tabbedPane.addChangeListener(e -> {
@@ -277,6 +289,314 @@ public class ResourceProfiler extends AbstractMarsToolAndApplication {
         return branchPanel;
     }
     
+    /**
+     * Create the empirical complexity panel.
+     *
+     * Complexity is not shown for the current run, because one run cannot
+     * establish a growth rate.  This panel instead sweeps a program across a
+     * series of input sizes and displays the fitted class, its confidence, the
+     * ranked runner-up classes, and the subordinate structural hint.  A result
+     * whose top two candidates are inseparable is displayed as "inconclusive"
+     * rather than being reported as a classification.
+     */
+    private JComponent createComplexityPanel() {
+        complexityPanel = new JPanel(new BorderLayout(5, 5));
+        complexityPanel.setBorder(standardBorder);
+
+        // --- controls ---
+        JPanel controls = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 2));
+
+        controls.add(new JLabel("Program:"));
+        benchmarkPathField = new JTextField(28);
+        if (mars.Globals.program != null && mars.Globals.program.getFilename() != null) {
+            benchmarkPathField.setText(mars.Globals.program.getFilename());
+        }
+        controls.add(benchmarkPathField);
+
+        JButton browseButton = new JButton("Browse...");
+        browseButton.addActionListener(e -> chooseBenchmarkFile());
+        controls.add(browseButton);
+
+        controls.add(new JLabel("Sizes:"));
+        sizesField = new JTextField("10,20,40,80,160,320", 16);
+        controls.add(sizesField);
+
+        controls.add(new JLabel("Array fill:"));
+        fillModeCombo = new JComboBox<String>(new String[]{
+            "ascending (search)", "descending (sort worst case)", "none"});
+        controls.add(fillModeCombo);
+
+        runSweepButton = new JButton("Run Empirical Sweep");
+        runSweepButton.addActionListener(e -> runEmpiricalSweep());
+        controls.add(runSweepButton);
+
+        // --- headline result ---
+        JPanel headline = new JPanel(new GridLayout(2, 1));
+        complexityResultLabel = new JLabel("No sweep run yet.");
+        complexityResultLabel.setFont(new Font("Arial", Font.BOLD, 16));
+        complexityDetailLabel = new JLabel(
+            "A complexity class cannot be determined from a single run. "
+            + "Run a sweep to measure the growth curve.");
+        complexityDetailLabel.setFont(new Font("Arial", Font.ITALIC, 11));
+        headline.add(complexityResultLabel);
+        headline.add(complexityDetailLabel);
+
+        JPanel top = new JPanel(new BorderLayout(5, 5));
+        top.add(controls, BorderLayout.NORTH);
+        top.add(headline, BorderLayout.SOUTH);
+
+        // --- ranked candidate table ---
+        complexityTableModel = new DefaultTableModel(
+            new String[]{"Rank", "Class", "Constant c", "Norm. MSE", "R^2", "Confidence"}, 0) {
+            public boolean isCellEditable(int row, int col) { return false; }
+        };
+        JTable complexityTable = new JTable(complexityTableModel);
+        complexityTable.setFont(tableFont);
+        complexityTable.setRowHeight(22);
+        JScrollPane tableScroll = new JScrollPane(complexityTable);
+        tableScroll.setBorder(BorderFactory.createTitledBorder(
+            "Ranked candidate classes (best fit first)"));
+        tableScroll.setPreferredSize(new Dimension(600, 160));
+
+        // --- measurements and notes ---
+        complexityDetailArea = new JTextArea();
+        complexityDetailArea.setFont(tableFont);
+        complexityDetailArea.setEditable(false);
+        JScrollPane detailScroll = new JScrollPane(complexityDetailArea);
+        detailScroll.setBorder(BorderFactory.createTitledBorder(
+            "Measurements, structural hint and notes"));
+
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, tableScroll, detailScroll);
+        split.setResizeWeight(0.5);
+
+        complexityPanel.add(top, BorderLayout.NORTH);
+        complexityPanel.add(split, BorderLayout.CENTER);
+
+        return complexityPanel;
+    }
+
+    /**
+     * Let the user pick a .asm benchmark to sweep.
+     */
+    private void chooseBenchmarkFile() {
+        JFileChooser chooser = new JFileChooser(new java.io.File("."));
+        chooser.setDialogTitle("Select MIPS benchmark to sweep");
+        if (chooser.showOpenDialog(complexityPanel) == JFileChooser.APPROVE_OPTION) {
+            benchmarkPathField.setText(chooser.getSelectedFile().getPath());
+        }
+    }
+
+    /**
+     * Parse the size sequence typed by the user.
+     * @return the sizes, or null if the text is not usable
+     */
+    private int[] parseSizes() {
+        String[] parts = sizesField.getText().split("[,\\s]+");
+        java.util.List<Integer> values = new ArrayList<Integer>();
+        for (int i = 0; i < parts.length; i++) {
+            if (parts[i].length() == 0) continue;
+            try {
+                int v = Integer.parseInt(parts[i].trim());
+                if (v <= 0) return null;
+                values.add(Integer.valueOf(v));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        if (values.size() < ComplexityFitter.MIN_SAMPLES) {
+            return null;
+        }
+        int[] sizes = new int[values.size()];
+        for (int i = 0; i < sizes.length; i++) {
+            sizes[i] = values.get(i).intValue();
+        }
+        return sizes;
+    }
+
+    /**
+     * Sweep the selected benchmark across the size sequence on a background
+     * thread and display the fitted result.
+     *
+     * The sweep assembles and executes the benchmark repeatedly, which
+     * overwrites the simulated memory and registers of the current session, so
+     * the user is warned before it starts.
+     */
+    private void runEmpiricalSweep() {
+        final String path = benchmarkPathField.getText().trim();
+        if (path.length() == 0) {
+            JOptionPane.showMessageDialog(complexityPanel,
+                "Choose a MIPS source file to sweep.",
+                "No program selected", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        final int[] sizes = parseSizes();
+        if (sizes == null) {
+            JOptionPane.showMessageDialog(complexityPanel,
+                "Enter at least " + ComplexityFitter.MIN_SAMPLES
+                + " positive input sizes, separated by commas.\n"
+                + "Fewer than that cannot determine a growth rate.",
+                "Invalid size sequence", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+
+        int confirm = JOptionPane.showConfirmDialog(complexityPanel,
+            "The sweep will assemble and run this program " + sizes.length
+            + " times.\nThis overwrites the simulated memory and registers of the\n"
+            + "current session; re-assemble afterwards to restore it.\n\nContinue?",
+            "Run empirical sweep", JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) {
+            return;
+        }
+
+        final int fillMode;
+        switch (fillModeCombo.getSelectedIndex()) {
+            case 1:  fillMode = EmpiricalComplexityRunner.FILL_DESCENDING; break;
+            case 2:  fillMode = EmpiricalComplexityRunner.FILL_NONE; break;
+            default: fillMode = EmpiricalComplexityRunner.FILL_ASCENDING; break;
+        }
+
+        runSweepButton.setEnabled(false);
+        complexityResultLabel.setText("Running sweep...");
+        complexityDetailLabel.setText("Executing " + sizes.length + " runs.");
+        complexityDetailArea.setText("");
+        clearTableModel(complexityTableModel);
+
+        Thread worker = new Thread(new Runnable() {
+            public void run() {
+                EmpiricalComplexityRunner runner = new EmpiricalComplexityRunner();
+                runner.setSizes(sizes);
+                String name = new java.io.File(path).getName();
+                final EmpiricalComplexityRunner.BenchmarkResult result =
+                    runner.runBenchmark(new EmpiricalComplexityRunner.Benchmark(
+                        name, path, fillMode, "unknown"));
+                SwingUtilities.invokeLater(new Runnable() {
+                    public void run() {
+                        displayComplexityResult(result);
+                        runSweepButton.setEnabled(true);
+                    }
+                });
+            }
+        }, "complexity-sweep");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    /**
+     * Render a completed sweep.  Low-confidence results are shown as
+     * "inconclusive" and are never silently presented as a classification.
+     */
+    private void displayComplexityResult(EmpiricalComplexityRunner.BenchmarkResult result) {
+        clearTableModel(complexityTableModel);
+
+        if (result.getError() != null) {
+            complexityResultLabel.setForeground(new Color(180, 0, 0));
+            complexityResultLabel.setText("Sweep failed");
+            complexityDetailLabel.setText(result.getError());
+            complexityDetailArea.setText(result.getError());
+            return;
+        }
+
+        ComplexityFitter.FitReport fit = result.getFitReport();
+        ComplexityFitter.FitResult best = fit.getBest();
+
+        if (fit.isNoCandidateFit()) {
+            // A different failure from "inconclusive", and shown differently:
+            // widening the size range will not help, because the true growth is
+            // outside the candidate set entirely.
+            complexityResultLabel.setForeground(new Color(180, 0, 0));
+            complexityResultLabel.setText("NO CANDIDATE CLASS FITS");
+            complexityDetailLabel.setText(String.format(
+                "Closest candidate %s has normalised MSE %.3e, above the %.1e ceiling. "
+                + "The measured growth lies outside the candidate set%s.",
+                best.getComplexityClass(), best.getNormalisedMse(),
+                ComplexityFitter.MAX_ACCEPTABLE_NMSE,
+                Double.isNaN(fit.getEstimatedExponent()) ? ""
+                    : String.format(" - it is closer to n^%.3f", fit.getEstimatedExponent())));
+        } else if (fit.isInconclusive()) {
+            complexityResultLabel.setForeground(new Color(170, 110, 0));
+            complexityResultLabel.setText("INCONCLUSIVE");
+            complexityDetailLabel.setText(String.format(
+                "Best fit %s could not be separated from %s (confidence %.3f, "
+                + "below the %.2f threshold). Widen the range of input sizes.",
+                best.getComplexityClass(),
+                fit.getRunnerUp() == null ? "?" : fit.getRunnerUp().getComplexityClass(),
+                best.getConfidence(), ComplexityFitter.LOW_CONFIDENCE_THRESHOLD));
+        } else {
+            complexityResultLabel.setForeground(new Color(0, 110, 0));
+            complexityResultLabel.setText(best.getComplexityClass());
+            complexityDetailLabel.setText(String.format(
+                "Confidence %.3f over runner-up %s   |   R^2 %.4f   |   "
+                + "normalised MSE %.3e   |   fitted constant c = %.4f",
+                best.getConfidence(),
+                fit.getRunnerUp() == null ? "-" : fit.getRunnerUp().getComplexityClass(),
+                best.getRSquared(), best.getNormalisedMse(), best.getScalingConstant()));
+        }
+
+        // Ranked candidates, including the runner-ups.
+        java.util.List<ComplexityFitter.FitResult> ranked = fit.getRanked();
+        for (int i = 0; i < ranked.size(); i++) {
+            ComplexityFitter.FitResult r = ranked.get(i);
+            complexityTableModel.addRow(new Object[]{
+                Integer.valueOf(i + 1),
+                r.getComplexityClass(),
+                Double.isInfinite(r.getNormalisedMse()) ? "n/a"
+                    : String.format("%.4f", r.getScalingConstant()),
+                Double.isInfinite(r.getNormalisedMse()) ? "not fittable"
+                    : String.format("%.6e", r.getNormalisedMse()),
+                Double.isInfinite(r.getRSquared()) ? "n/a"
+                    : String.format("%.4f", r.getRSquared()),
+                i == 0 ? String.format("%.3f", r.getConfidence()) : "-"
+            });
+        }
+
+        // Measurements, hint and disagreement.
+        StringBuilder sb = new StringBuilder();
+        sb.append("Cost metric: dynamic instruction count "
+            + "(deterministic and hardware-independent).\n\n");
+        sb.append(String.format("%10s  %18s  %12s%n", "n", "instructions", "ratio"));
+        java.util.List<ComplexityFitter.Sample> samples = result.getSamples();
+        for (int i = 0; i < samples.size(); i++) {
+            ComplexityFitter.Sample s = samples.get(i);
+            String ratio = "-";
+            if (i > 0 && samples.get(i - 1).getCost() > 0) {
+                ratio = String.format("%.3fx", (double) s.getCost() / samples.get(i - 1).getCost());
+            }
+            sb.append(String.format("%10d  %,18d  %12s%n", s.getN(), s.getCost(), ratio));
+        }
+
+        // Absolute fit check and the open-ended exponent, both shown whatever
+        // the verdict: they are most informative when the classification is
+        // unsatisfying.
+        sb.append("\n").append(ComplexityFitter.formatDiagnostics(fit));
+
+        AlgorithmComplexityAnalyzer.StructuralHint hint = result.getStructuralHint();
+        sb.append("\nStructural hint (static analysis, SUBORDINATE to the fit):\n");
+        if (hint == null || !hint.isAvailable()) {
+            sb.append("  unavailable\n");
+        } else {
+            sb.append("  loop nesting depth ").append(hint.getNestingDepth())
+              .append(", ").append(hint.getLoopCount()).append(" loop(s)")
+              .append(" => implies ").append(hint.getImpliedClass()).append("\n");
+            sb.append("  Nesting depth counts loops, not iterations, so it over-states the\n");
+            sb.append("  cost of any loop whose trip count is sublinear.\n");
+
+            if (!hint.getImpliedClass().equals(best.getComplexityClass())) {
+                sb.append("\n** DISAGREEMENT **\n");
+                sb.append("  Structural hint says ").append(hint.getImpliedClass())
+                  .append("; the empirical fit says ").append(best.getComplexityClass()).append(".\n");
+                sb.append("  The empirical fit is authoritative. This normally means a loop's\n");
+                sb.append("  trip count is not proportional to the input size.\n");
+            }
+        }
+
+        if (fit.getNote() != null) {
+            sb.append("\nNote: ").append(fit.getNote()).append("\n");
+        }
+        complexityDetailArea.setText(sb.toString());
+        complexityDetailArea.setCaretPosition(0);
+    }
+
     /**
      * Override reset to clear display when user clicks Reset button
      */

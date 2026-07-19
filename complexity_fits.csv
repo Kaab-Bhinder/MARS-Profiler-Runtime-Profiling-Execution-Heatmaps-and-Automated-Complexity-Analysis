@@ -1,0 +1,6 @@
+benchmark,predictedClass,trueClass,normalisedMse,rSquared,confidence,verdict,inconclusive,noCandidateFit,estimatedExponent,exponentRSquared,structuralHint,agreement
+heatmap_test,O(1),O(1),0.0000000000e+00,1.000000,1.000000,classified,false,false,0.000000,1.000000,O(n),disagree
+binary_search,O(log n),O(log n),1.6554440622e-04,0.984251,0.984500,classified,false,false,0.228413,0.986543,O(n),disagree
+recursive_binary_search,O(log n),O(log n),1.7205546396e-04,0.983554,0.983812,classified,false,false,0.227786,0.986617,O(1),disagree
+linear_search,O(n),O(n),8.3786172948e-06,0.999901,0.993573,classified,false,false,0.963618,0.999713,O(n),agree
+bubble_sort,O(n^2),O(n^2),2.6280754679e-07,0.999998,0.999904,classified,false,false,2.031873,0.999949,O(n^2),agree

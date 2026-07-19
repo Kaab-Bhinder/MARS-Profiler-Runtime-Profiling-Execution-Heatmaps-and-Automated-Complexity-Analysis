@@ -235,18 +235,45 @@ public class PerformanceAnalysisReport {
             recommendations.append("   - Pipeline may suffer from branch mispredictions\n\n");
         }
         
-        // Check for algorithmic inefficiency
-        String complexity = analysis.getEstimatedComplexity();
-        if (complexity.contains("O(n³)") || complexity.contains("O(n²)")) {
-            recommendations.append("🔴 ALGORITHMIC INEFFICIENCY:\n");
-            recommendations.append("   - Current algorithm has high time complexity\n");
-            recommendations.append("   - Recommendation: Consider a more efficient algorithm\n");
-            if (complexity.contains("O(n³)")) {
-                recommendations.append("   - Cubic complexity: Consider divide-and-conquer or dynamic programming\n");
-            } else {
-                recommendations.append("   - Quadratic complexity: Consider binary search or sorting improvements\n");
+        // Check for algorithmic inefficiency.  This is driven only by an
+        // empirical multi-size fit; a single run cannot establish a complexity
+        // class, so with no fit available we say so rather than guess.
+        ComplexityFitter.FitReport fit = analysis.getEmpiricalFit();
+        if (fit == null) {
+            recommendations.append("ℹ️  NO COMPLEXITY CLASSIFICATION AVAILABLE:\n");
+            recommendations.append("   - Complexity cannot be determined from a single input size\n");
+            recommendations.append("   - Run mars.simulator.EmpiricalComplexityRunner over this program\n");
+            recommendations.append("     to measure its growth curve across several input sizes\n\n");
+        } else if (fit.isInconclusive()) {
+            recommendations.append("⚠️  COMPLEXITY FIT INCONCLUSIVE:\n");
+            recommendations.append("   - The top candidate classes are not separable by this data\n");
+            recommendations.append("   - Recommendation: widen the range of input sizes and re-measure\n\n");
+        } else {
+            String complexity = fit.getBest().getComplexityClass();
+            if (ComplexityFitter.CLASS_CUBIC.equals(complexity)
+                    || ComplexityFitter.CLASS_QUADRATIC.equals(complexity)) {
+                recommendations.append("🔴 ALGORITHMIC INEFFICIENCY:\n");
+                recommendations.append("   - Measured growth is ").append(complexity).append("\n");
+                recommendations.append("   - Recommendation: Consider a more efficient algorithm\n");
+                if (ComplexityFitter.CLASS_CUBIC.equals(complexity)) {
+                    recommendations.append("   - Cubic complexity: Consider divide-and-conquer or dynamic programming\n");
+                } else {
+                    recommendations.append("   - Quadratic complexity: Consider binary search or sorting improvements\n");
+                }
+                recommendations.append("\n");
             }
-            recommendations.append("\n");
+        }
+
+        // A hint/fit disagreement is scientifically interesting, so report it
+        // rather than quietly preferring one of the two.
+        if (analysis.hasStructuralDisagreement()) {
+            recommendations.append("🔎 STRUCTURE / MEASUREMENT DISAGREEMENT:\n");
+            recommendations.append("   - Static loop nesting implies ")
+                           .append(analysis.getStructuralHint().getImpliedClass())
+                           .append(", measured growth is ")
+                           .append(fit.getBest().getComplexityClass()).append("\n");
+            recommendations.append("   - This normally means a loop's trip count is not proportional\n");
+            recommendations.append("     to the input size (e.g. a halving search loop)\n\n");
         }
         
         // Check for CPI efficiency
@@ -292,10 +319,15 @@ public class PerformanceAnalysisReport {
         summary.append(String.format("  Instructions Executed:  %,d\n", analysis.getTotalInstructions()));
         summary.append(String.format("  Total Cycles:           %,d\n", analysis.getTotalCycles()));
         summary.append(String.format("  CPI (Cycles/Instr):     %.2f\n", analysis.getCyclesPerInstruction()));
-        summary.append(String.format("  Estimated Complexity:   %s\n\n", analysis.getEstimatedComplexity()));
-        
-        summary.append(String.format("  Loop Nesting Level:     %d\n", analysis.getLoopStructure().getNestingLevel()));
+        summary.append(String.format("  Complexity:             %s\n\n", analysis.getEstimatedComplexity()));
+
+        AlgorithmComplexityAnalyzer.StructuralHint hint = analysis.getStructuralHint();
+        summary.append(String.format("  Loop Nesting (static):  %s\n",
+            (hint != null && hint.isAvailable()) ? String.valueOf(hint.getNestingDepth()) : "unavailable"));
         summary.append(String.format("  Max Line Execution:     %,d times\n", analysis.getLoopStructure().getMaxExecutionCount()));
+        if (analysis.hasStructuralDisagreement()) {
+            summary.append("  ** structural hint and empirical fit disagree - see full report **\n");
+        }
         summary.append("\n");
         
         return summary.toString();

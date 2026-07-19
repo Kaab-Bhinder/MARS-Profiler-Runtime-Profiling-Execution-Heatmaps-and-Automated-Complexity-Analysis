@@ -1,25 +1,45 @@
-# Simple test program for heatmap visualization
-# This program has multiple execution paths to create visible heatmap
+# ==============================================================================
+# Fixed-Iteration Loop -- expected complexity O(1)
+# ==============================================================================
+#
+# EMPIRICAL BENCHMARK CONVENTION
+# ------------------------------
+# This program follows the data-segment layout used by
+# mars.simulator.EmpiricalComplexityRunner (size / target / arr), but it
+# DELIBERATELY IGNORES the patched size.  The loop below always runs a fixed
+# number of iterations, so its dynamic instruction count is identical at every
+# input size.
+#
+# That makes it the control case for the empirical classifier: a correct
+# classifier must report O(1) here at every n.  The previous
+# threshold-on-magnitude classifier could not, because it inferred the
+# complexity class from how large the execution count happened to be rather
+# than from how it grew.
+#
+# It also doubles as the heatmap demonstration program: the loop body lines are
+# executed many times over and render hot, while the prologue and epilogue
+# render cold.
+# ==============================================================================
 
 .data
-    arr:  .word 1, 2, 3, 4, 5
+    size:   .word 64            # patched by the runner, but intentionally unused
+    target: .word -1            # unused by this benchmark
+    .align 2
+    arr:    .word 1, 2, 3, 4, 5
 
 .text
 .globl main
 
 main:
-    # Initialize counter
-    li $t0, 0          # Line 12: initialization (low freq)
-    li $t1, 5          # Line 13: loop counter
-    
+    li $t0, 0               # accumulator
+    li $t1, 5               # fixed iteration count, independent of size
+
 loop:
-    # Loop body - executed multiple times (should be red/orange)
-    addi $t0, $t0, 1   # Line 18: increment (HIGH freq - red)
-    beq $t1, $zero, end # Line 19: check condition (HIGH freq)
-    addi $t1, $t1, -1  # Line 20: decrement (HIGH freq)
-    j loop             # Line 21: jump back (HIGH freq - red)
-    
+    addi $t0, $t0, 1        # loop body (hot)
+    beq  $t1, $zero, end    # exit test (hot)
+    addi $t1, $t1, -1       # decrement (hot)
+    j    loop               # back edge (hot)
+
 end:
-    # Program end - executed once (low freq - green)
-    li $v0, 10         # Line 25: exit syscall setup (low freq)
-    syscall            # Line 26: exit (low freq)
+    li $v0, 10              # exit syscall setup (cold)
+    syscall                 # exit (cold)
